@@ -1,0 +1,14 @@
+names:
+- ball
+- hoop
+nc: 2
+path: C:\Users\bilal\basketball-shot-detector\roboflow_dataset
+roboflow:
+  license: CC BY 4.0
+  project: basketball-xptln
+  url: https://universe.roboflow.com/basketballshottracker/basketball-xptln/dataset/1
+  version: 1
+  workspace: basketballshottracker
+test: ../test/images
+train: ../train/images
+val: ../valid/images
