@@ -105,7 +105,7 @@ class KalmanShotDetector:
         self.smooth_positions = deque(maxlen=30) # visually smoothed positions
 
         # EMA for visual smoothing (higher = more responsive, lower = smoother)
-        self._ema_beta = 0.85
+        self._ema_beta = 0.6
         self._ema_center = None  # running EMA of (x, y)
 
         # Hoop state (smoothed)
@@ -122,6 +122,7 @@ class KalmanShotDetector:
         self.last_shot_frame = -60
         self.cooldown_frames = 36  # ~0.6s @60fps
 
+        
     def _smooth_hoop(self, center, size):
         if self.hoop_center is None:
             self.hoop_center = center
@@ -176,7 +177,6 @@ class KalmanShotDetector:
             writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
             if output_path and not writer.isOpened():
                 raise RuntimeError(f"VideoWriter failed to open for: {out_path}")
-
 
         frame_num = 0
         frames_since_ball_det = 0
@@ -238,26 +238,33 @@ class KalmanShotDetector:
                     bx, by = _clamp_point(draw_point[0], draw_point[1], width, height)
                     self.ball_positions.append((bx, by))
 
-                    # Visual EMA smoothing for the trail
-                    sbx, sby = self._ema_update((bx, by))
-                    self.smooth_positions.append((sbx, sby))
+                    # Only add to trail if ball is actually detected (not predicted)
+                    if ball_detected:
+                        sbx, sby = self._ema_update((bx, by))
+                        self.smooth_positions.append((sbx, sby))
+                    else:
+                        # Clear trail when we're relying on predictions
+                        self.smooth_positions.clear()
+                        self._ema_center = None  # Reset EMA state
 
                     # Draw rectangle for predicted-only frames using last size
                     if (not ball_detected) and self.ball_box_size is not None:
                         bw, bh = self.ball_box_size
-                        px1 = sbx - bw / 2.0
-                        py1 = sby - bh / 2.0
-                        px2 = sbx + bw / 2.0
-                        py2 = sby + bh / 2.0
+                        px1 = bx - bw / 2.0
+                        py1 = by - bh / 2.0
+                        px2 = bx + bw / 2.0
+                        py2 = by + bh / 2.0
                         px1, py1, px2, py2 = _clamp_box(px1, py1, px2, py2, width, height)
                         cv2.rectangle(frame, (px1, py1), (px2, py2), (0, 255, 255), 2)
                         cv2.putText(frame, "ball (pred)", (px1, max(0, py1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-                    # Also draw the center for visualizing behavior
+                    # Draw center point
                     color = (0, 255, 0) if ball_detected else (0, 255, 255)
-                    cv2.circle(frame, (sbx, sby), 10, color, 2, lineType=cv2.LINE_AA)
+                    display_x, display_y = (sbx, sby) if ball_detected and len(self.smooth_positions) > 0 else (bx, by)
+                    cv2.circle(frame, (display_x, display_y), 10, color, 2, lineType=cv2.LINE_AA)
 
-                    if self.check_shot(sbx, sby, frame_num):
+                    # Only check for shots when we have actual detections
+                    if ball_detected and self.check_shot(display_x, display_y, frame_num):
                         self.shot_count += 1
                         cv2.putText(
                             frame,
@@ -269,7 +276,7 @@ class KalmanShotDetector:
                             4,
                         )
 
-                # Trail (use smoothed positions for rendering)
+                # Trail (only draw when we have actual detections)
                 if len(self.smooth_positions) > 1:
                     pts = np.array(self.smooth_positions, dtype=np.int32).reshape(-1, 1, 2)
                     cv2.polylines(frame, [pts], isClosed=False, color=(0, 255, 255), thickness=2, lineType=cv2.LINE_AA)
@@ -307,7 +314,7 @@ class KalmanShotDetector:
                 if self.hoop_center and self.hoop_size:
                     hx, hy = map(int, self.hoop_center)
                     hw, hh = self.hoop_size
-                    rim_y = int(hy - 15)
+                    rim_y = int(hy - 25)
                     cv2.line(
                         frame,
                         (hx - int(hw // 2), rim_y),
@@ -341,34 +348,44 @@ class KalmanShotDetector:
                     pass
 
         return self.shot_count
+        
+
 
     def check_shot(self, bx: int, by: int, frame_num: int) -> bool:
-        """Detect a make via downward crossing of a horizontal rim line near hoop center,
-        with horizontal gating and cooldown to avoid double counts.
-        Uses smoothed center for robustness.
-        """
-        if self.hoop_center is None or self.hoop_size is None:
+            """Detect shot by simple top line crossing with proper gating"""
+            if self.hoop_center is None or self.hoop_size is None:
+                return False
+            
+            # Cooldown to avoid double counts
+            if frame_num - self.last_shot_frame < self.cooldown_frames:
+                return False
+
+            hx, hy = self.hoop_center
+            hw, hh = self.hoop_size
+            
+            # Detection line (same as your visual line)
+            rim_y = int(hy - 35)
+            
+            # Horizontal gate - ball must be reasonably centered
+            gate_width = 0.6 * hw  # 60% of hoop width
+            
+            # Need at least 2 positions for crossing detection
+            if len(self.smooth_positions) < 2:
+                return False
+            
+            prev_x, prev_y = self.smooth_positions[-2]
+            curr_x, curr_y = bx, by
+            
+            # Check for downward crossing of the rim line
+            if prev_y < rim_y <= curr_y:  # Ball crossed from above to below
+                if abs(curr_x - hx) <= gate_width:  # Ball is centered enough
+                    if curr_y > prev_y:  # Confirm downward motion
+                        self.last_shot_frame = frame_num
+                        print(f"[SHOT] frame={frame_num} crossed rim_y={rim_y} at x={bx:.1f} (hoop center={hx:.1f})")
+                        return True
+            
             return False
-        if frame_num - self.last_shot_frame < self.cooldown_frames:
-            return False
 
-        hx, hy = self.hoop_center
-        hw, hh = self.hoop_size
-
-        rim_offset = 15
-        rim_y = int(hy - rim_offset)
-
-        if len(self.smooth_positions) >= 2:
-            prev_y = self.smooth_positions[-2][1]
-            curr_y = by
-            if prev_y < rim_y <= curr_y:  # crossing top -> bottom
-                if abs(bx - hx) <= 0.4 * hw:  # horizontal gate (40% of hoop width)
-                    self.last_shot_frame = frame_num
-                    print(
-                        f"[SHOT] frame={frame_num} cross rim_y={rim_y} bx={bx:.1f} hx={hx:.1f}"
-                    )
-                    return True
-        return False
 
 
 def main():
