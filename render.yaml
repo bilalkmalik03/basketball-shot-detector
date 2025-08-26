@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: bball-tracker-backend
+    env: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: ULTRALYTICS_SETTINGS
+        value: "https://"

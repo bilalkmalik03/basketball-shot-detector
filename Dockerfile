@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 5000
 
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind=0.0.0.0:8000", "backend.app:app"]
